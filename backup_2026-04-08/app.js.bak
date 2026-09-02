@@ -1,0 +1,1130 @@
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+import { 
+    getAuth, 
+    signInWithEmailAndPassword, 
+    createUserWithEmailAndPassword, 
+    onAuthStateChanged, 
+    signOut 
+} from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
+import { 
+    getFirestore, 
+    collection, 
+    addDoc, 
+    query, 
+    where, 
+    onSnapshot, 
+    orderBy,
+    doc,
+    updateDoc,
+    deleteDoc
+} from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+
+// --- CONFIGURATION ---
+const firebaseConfig = {
+    apiKey: "AIzaSyBJpFZs9sJ9wEZIczWKXUzLZhgJkcwniEA",
+    authDomain: "my-cloud-drive-a4720.firebaseapp.com",
+    projectId: "my-cloud-drive-a4720",
+    storageBucket: "my-cloud-drive-a4720.firebasestorage.app",
+    messagingSenderId: "555774759189",
+    appId: "1:555774759189:web:b05fc2b95f2d569185191c",
+    measurementId: "G-J6P0ZB25ML"
+};
+
+const CLOUDINARY_CLOUD_NAME = "dcu3qdqpt";
+const CLOUDINARY_UPLOAD_PRESET = "clouddrive_preset";
+
+// --- INITIALIZATION ---
+let app, auth, db;
+try {
+    app = initializeApp(firebaseConfig);
+    auth = getAuth(app);
+    db = getFirestore(app);
+} catch (error) {
+    console.error("Firebase Initialization Error:", error);
+}
+
+// --- UI ELEMENTS ---
+const authScreen = document.getElementById('auth-screen');
+const dashboardContainer = document.getElementById('dashboard-container');
+const authForm = document.getElementById('auth-form');
+const authEmail = document.getElementById('auth-email');
+const authPassword = document.getElementById('auth-password');
+const authBtnText = document.getElementById('auth-btn-text');
+const authToggleText = document.getElementById('auth-toggle-text');
+const toggleAuthMode = document.getElementById('toggle-auth-mode');
+
+const btnUpload = document.getElementById('btn-upload');
+const btnLogout = document.getElementById('btn-logout');
+const modalContainer = document.getElementById('modal-container');
+const fileGrid = document.getElementById('file-grid');
+const emptyState = document.getElementById('empty-state');
+const userNameDisplay = document.getElementById('user-name');
+const storageIndicator = document.getElementById('progress-indicator');
+const storageStatus = document.getElementById('storage-status');
+const viewTitle = document.getElementById('view-title');
+const breadcrumbContainer = document.getElementById('breadcrumb-container');
+const btnNewFolder = document.getElementById('btn-new-folder');
+const folderModal = document.getElementById('folder-modal');
+const folderForm = document.getElementById('folder-form');
+const folderInput = document.getElementById('folder-input');
+
+let isLoginMode = true;
+let currentUser = null;
+let currentView = 'all'; 
+let allFiles = [];
+let currentlyActiveFile = null; 
+let hasShown15Alert = false;
+let hasShown20Alert = false;
+let currentFolderId = null; 
+let folderPath = []; 
+let selectedFiles = new Set();
+let currentSortConfig = { field: 'createdAt', order: 'desc' };
+let currentTypeFilter = 'all';
+
+// --- UTILS ---
+const showToast = (message, type = 'success') => {
+    const container = document.getElementById('toast-container');
+    const toast = document.createElement('div');
+    toast.className = `toast ${type === 'error' ? 'error' : ''}`;
+    toast.innerHTML = `<i class="fas ${type === 'error' ? 'fa-exclamation-circle' : 'fa-check-circle'}"></i> <span>${message}</span>`;
+    container.appendChild(toast);
+    setTimeout(() => {
+        toast.classList.add('fade-out');
+        setTimeout(() => toast.remove(), 300);
+    }, 3000);
+};
+
+// --- AUTH LOGIC ---
+const updateAuthUI = (user) => {
+    if (user) {
+        currentUser = user;
+        authScreen.classList.add('hidden');
+        dashboardContainer.classList.remove('hidden');
+        userNameDisplay.textContent = user.email.split('@')[0];
+        const savedView = localStorage.getItem('savedView') || 'all';
+        const savedLayout = localStorage.getItem('savedLayout') || 'grid';
+        
+        switchView(savedView);
+        if (savedLayout === 'list') {
+            fileGrid.classList.add('list-view');
+            document.getElementById('btn-list-view').classList.add('active');
+            document.getElementById('btn-grid-view').classList.remove('active');
+        }
+        loadUserFiles(user.uid);
+    } else {
+        currentUser = null;
+        authScreen.classList.remove('hidden');
+        dashboardContainer.classList.add('hidden');
+        allFiles = [];
+        renderFiles([]);
+    }
+};
+
+if (auth) {
+    onAuthStateChanged(auth, updateAuthUI);
+}
+
+toggleAuthMode.addEventListener('click', (e) => {
+    e.preventDefault();
+    isLoginMode = !isLoginMode;
+    authBtnText.textContent = isLoginMode ? "Sign In" : "Create Account";
+    authToggleText.innerHTML = isLoginMode ? 
+        `New here? <a href="#" id="toggle-auth-mode">Create an Account</a>` : 
+        `Already have an account? <a href="#" id="toggle-auth-mode">Sign In</a>`;
+    // Re-attach listener as innerHTML wipes it
+    document.getElementById('toggle-auth-mode').onclick = (evt) => {
+        evt.preventDefault();
+        toggleAuthMode.click();
+    };
+});
+
+authForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const email = authEmail.value;
+    const password = authPassword.value;
+
+    try {
+        if (isLoginMode) {
+            await signInWithEmailAndPassword(auth, email, password);
+            showToast("Welcome back!");
+        } else {
+            await createUserWithEmailAndPassword(auth, email, password);
+            showToast("Account created successfully!");
+        }
+    } catch (error) {
+        showToast(error.message, 'error');
+    }
+});
+
+btnLogout.addEventListener('click', () => {
+    hasShown15Alert = false;
+    hasShown20Alert = false;
+    signOut(auth);
+});
+
+// --- VIEW TOGGLES ---
+document.getElementById('btn-grid-view').onclick = () => {
+    fileGrid.classList.remove('list-view');
+    document.getElementById('btn-grid-view').classList.add('active');
+    document.getElementById('btn-list-view').classList.remove('active');
+    localStorage.setItem('savedLayout', 'grid');
+};
+document.getElementById('btn-list-view').onclick = () => {
+    fileGrid.classList.add('list-view');
+    document.getElementById('btn-list-view').classList.add('active');
+    document.getElementById('btn-grid-view').classList.remove('active');
+    localStorage.setItem('savedLayout', 'list');
+};
+
+// --- SIDEBAR NAVIGATION ---
+const switchView = (view) => {
+    currentView = view;
+    document.querySelectorAll('.nav-item').forEach(btn => btn.classList.remove('active'));
+    
+    let btnId = 'btn-my-drive';
+    if (view === 'recent') btnId = 'btn-recent';
+    if (view === 'starred') btnId = 'btn-starred';
+    if (view === 'folders') btnId = 'btn-folders';
+    if (view === 'trash') btnId = 'btn-trash';
+    
+    document.getElementById(btnId).classList.add('active');
+    
+    // Reset search
+    fileSearch.value = "";
+    
+    // Update title
+    if (view === 'all') viewTitle.textContent = 'My Drive';
+    else if (view === 'folders') viewTitle.textContent = 'All Folders';
+    else viewTitle.textContent = view.charAt(0).toUpperCase() + view.slice(1);
+    
+    // Always reset folder context when switching views from the sidebar to ensure root discovery
+    // This allows clicking "My Drive" to return and show "all files and folder" as requested.
+    if (view !== 'search') {
+        currentFolderId = null;
+        folderPath = [];
+    }
+
+    localStorage.setItem('savedView', view); // PERSIST VIEW
+    renderFiles(allFiles);
+};
+
+document.getElementById('btn-my-drive').onclick = () => switchView('all');
+document.getElementById('btn-recent').onclick = () => switchView('recent');
+document.getElementById('btn-starred').onclick = () => switchView('starred');
+document.getElementById('btn-folders').onclick = () => switchView('folders');
+document.getElementById('btn-trash').onclick = () => switchView('trash');
+
+const fileSearch = document.getElementById('file-search');
+const fileTypeFilter = document.getElementById('file-type-filter');
+const fileSort = document.getElementById('file-sort');
+const btnEmptyTrash = document.getElementById('btn-empty-trash');
+
+if (fileSearch) {
+    fileSearch.addEventListener('input', () => renderFiles(allFiles));
+}
+if (fileTypeFilter) {
+    fileTypeFilter.addEventListener('change', (e) => {
+        currentTypeFilter = e.target.value;
+        renderFiles(allFiles);
+    });
+}
+if (fileSort) {
+    fileSort.addEventListener('change', (e) => {
+        const parts = e.target.value.split('-');
+        currentSortConfig = { field: parts[0] === 'date' ? 'createdAt' : parts[0], order: parts[1] };
+        renderFiles(allFiles);
+    });
+}
+if (btnEmptyTrash) {
+    btnEmptyTrash.addEventListener('click', async () => {
+        if (!confirm("Are you sure you want to permanently delete all items in Trash?")) return;
+        const trashFiles = allFiles.filter(f => f.status === 'trash');
+        showToast("Emptying trash...");
+        for (const file of trashFiles) {
+            try { await deleteDoc(doc(db, "files", file.id)); } catch(e){}
+        }
+        showToast("Trash Emptied");
+    });
+}
+
+// --- CLOUDINARY UPLOAD ---
+const myWidget = cloudinary.createUploadWidget({
+    cloudName: CLOUDINARY_CLOUD_NAME, 
+    uploadPreset: CLOUDINARY_UPLOAD_PRESET,
+    folder: 'clouddrive', 
+    resourceType: 'auto',
+    clientAllowedFormats: ['png', 'jpg', 'jpeg', 'webp', 'pdf', 'docx', 'xlsx', 'zip', 'mp3', 'csv', 'mp4', 'rar'],
+    maxFileSize: 1000000000 // 1GB limit
+}, (error, result) => { 
+    if (!error && result && result.event === "success") { 
+        if (result.info.bytes > 1000000000) {
+            showModal(document.getElementById('alert-1gb-file'));
+            return;
+        }
+        saveFileMetadata(result.info);
+        showToast("File uploaded successfully");
+    }
+});
+
+btnUpload.addEventListener('click', () => {
+    if (currentUser) {
+        myWidget.open();
+    } else {
+        showToast("Please login to upload files", 'error');
+    }
+});
+
+const saveFileMetadata = async (fileInfo) => {
+    try {
+        // ULTIMATE FORMAT PROTECTION: Extract from URL to avoid .bin bug
+        const urlParts = fileInfo.secure_url.split('.');
+        const detectedExt = urlParts.pop().toLowerCase();
+        const baseName = fileInfo.original_filename;
+        const fileName = `${baseName}.${detectedExt}`;
+        
+        await addDoc(collection(db, "files"), {
+            userId: currentUser.uid,
+            name: fileName,
+            url: fileInfo.secure_url,
+            type: fileInfo.resource_type,
+            format: detectedExt,
+            size: fileInfo.bytes,
+            createdAt: Date.now(),
+            isStarred: false,
+            status: 'active',
+            parentId: currentFolderId || null
+        });
+    } catch (error) {
+        console.error("Error saving file info:", error);
+    }
+};
+
+// --- FIRESTORE REAL-TIME UPDATES ---
+// --- FIRESTORE REAL-TIME UPDATES ---
+const loadUserFiles = (uid) => {
+    const q = query(collection(db, "files"), where("userId", "==", uid));
+    onSnapshot(q, (snapshot) => {
+        allFiles = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        allFiles.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+        updateStorageUsage(); // Sync storage globally
+        renderFiles(allFiles);
+    });
+};
+
+const updateStorageUsage = () => {
+    const totalSize = allFiles.reduce((acc, f) => acc + (f.size || 0), 0);
+    const limit = 25 * 1024 * 1024 * 1024;
+    const usagePercent = (totalSize / limit) * 100;
+    
+    storageIndicator.style.width = usagePercent + '%';
+    storageStatus.textContent = `${(totalSize / 1024 / 1024).toFixed(1)} MB / 25 GB`;
+
+    // Threshold Alerts (Persistent logic)
+    if (totalSize > 21474836480 && !hasShown20Alert) { // ~20GB
+        showModal(document.getElementById('alert-20gb'));
+        hasShown20Alert = true;
+    } else if (totalSize > 16106127360 && !hasShown15Alert) { // ~15GB
+        showModal(document.getElementById('alert-15gb'));
+        hasShown15Alert = true;
+    }
+};
+
+// --- UI RENDERING ---
+const renderBreadcrumbs = () => {
+    const breadcrumbContainer = document.getElementById('breadcrumb-container');
+    if (!breadcrumbContainer) return;
+
+    if (!currentFolderId) {
+        breadcrumbContainer.style.display = 'none';
+        breadcrumbContainer.innerHTML = '';
+        return;
+    }
+    
+    breadcrumbContainer.style.display = 'flex';
+    breadcrumbContainer.innerHTML = '';
+    
+    // Root link
+    const rootLink = document.createElement('span');
+    rootLink.className = 'breadcrumb-item';
+    rootLink.textContent = 'Drive'; 
+    rootLink.onclick = () => navigateToPath(-1);
+    breadcrumbContainer.appendChild(rootLink);
+    
+    folderPath.forEach((folder, index) => {
+        const separator = document.createElement('span');
+        separator.className = 'breadcrumb-separator';
+        separator.innerHTML = '<i class="fas fa-chevron-right"></i>';
+        breadcrumbContainer.appendChild(separator);
+        
+        const link = document.createElement('span');
+        link.className = `breadcrumb-item ${index === folderPath.length - 1 ? 'active' : ''}`;
+        link.textContent = folder.name;
+        link.onclick = () => navigateToPath(index);
+        breadcrumbContainer.appendChild(link);
+    });
+};
+
+const renderFiles = (files) => {
+    const fileGrid = document.getElementById('file-grid');
+    const emptyState = document.getElementById('empty-state');
+    const titleEl = document.getElementById('view-title');
+    const btnEmptyTrash = document.getElementById('btn-empty-trash');
+    const searchTerm = fileSearch ? fileSearch.value.trim().toLowerCase() : "";
+    if (!fileGrid || !emptyState || !titleEl) return;
+
+    fileGrid.innerHTML = '';
+    
+    // Manage Bulk Action Bar resets
+    if (selectedFiles.size > 0 && currentView !== 'trash') {
+        const hasTrashItems = [...selectedFiles].some(id => {
+            const f = allFiles.find(af => af.id === id);
+            return f && f.status === 'trash';
+        });
+        if (hasTrashItems) clearSelection();
+    }
+
+    if (btnEmptyTrash) {
+        btnEmptyTrash.classList.toggle('hidden', currentView !== 'trash');
+    }
+
+    let filtered = files.filter(f => {
+        if (currentView !== 'trash' && f.status === 'trash') return false;
+        if (currentView === 'trash' && f.status !== 'trash') return false;
+        return true;
+    });
+
+    // 1. Apply Type Filter
+    if (currentTypeFilter !== 'all') {
+        filtered = filtered.filter(f => {
+            if (f.type === 'folder') return false;
+            if (currentTypeFilter === 'pdf') return (f.format || '').toLowerCase() === 'pdf';
+            if (currentTypeFilter === 'doc') return ['doc','docx','xls','xlsx','csv'].includes((f.format || '').toLowerCase());
+            return f.type && f.type.startsWith(currentTypeFilter);
+        });
+    }
+
+    // 2. Apply Search OR View Restrictions
+    if (searchTerm) {
+        titleEl.textContent = `Search results for "${searchTerm}"`;
+        filtered = filtered.filter(f => f.name.toLowerCase().includes(searchTerm));
+    } else {
+        if (currentView === 'all') {
+            if (currentFolderId) {
+                const currentFolder = allFiles.find(f => f.id === currentFolderId);
+                titleEl.textContent = currentFolder ? currentFolder.name : "My Drive";
+            } else {
+                titleEl.textContent = "My Drive";
+            }
+            filtered = filtered.filter(f => (f.parentId || null) === (currentFolderId || null));
+        } else if (currentView === 'folders') {
+            if (currentFolderId) {
+                const currentFolder = allFiles.find(f => f.id === currentFolderId);
+                titleEl.textContent = currentFolder ? currentFolder.name : "All Folders";
+                filtered = filtered.filter(f => (f.parentId || null) === (currentFolderId || null));
+            } else {
+                titleEl.textContent = "All Folders";
+                filtered = filtered.filter(f => f.type === 'folder' && !f.parentId);
+            }
+        } else if (currentView === 'recent') {
+            titleEl.textContent = "Recent Files";
+            filtered = filtered.filter(f => f.type !== 'folder');
+        } else if (currentView === 'starred') {
+            titleEl.textContent = "Starred Files";
+            filtered = filtered.filter(f => f.isStarred);
+        } else if (currentView === 'trash') {
+            titleEl.textContent = "Trash Bin";
+        }
+    }
+
+    // 3. Apply Sorting
+    filtered.sort((a, b) => {
+        let valA, valB;
+        if (currentSortConfig.field === 'name') {
+            valA = a.name.toLowerCase(); valB = b.name.toLowerCase();
+        } else if (currentSortConfig.field === 'size') {
+            valA = a.size || 0; valB = b.size || 0;
+        } else {
+            valA = a.createdAt || 0; valB = b.createdAt || 0;
+        }
+        
+        if (valA < valB) return currentSortConfig.order === 'asc' ? -1 : 1;
+        if (valA > valB) return currentSortConfig.order === 'asc' ? 1 : -1;
+        return 0;
+    });
+
+    renderBreadcrumbs();
+
+    if (filtered.length === 0) {
+        emptyState.classList.remove('hidden');
+        fileGrid.classList.add('hidden');
+    } else {
+        emptyState.classList.add('hidden');
+        fileGrid.classList.remove('hidden');
+        
+        filtered.forEach(file => {
+            const card = document.createElement('div');
+            const isFolder = file.type === 'folder';
+            const isSelected = selectedFiles.has(file.id);
+            
+            card.className = `file-card ${file.isStarred ? 'starred' : ''} ${isFolder ? 'folder' : ''} ${isSelected ? 'selected' : ''}`;
+            
+            let previewHTML = '';
+            let folderColorStyle = '';
+            
+            if (isFolder) {
+                const folderColor = file.color && file.color !== 'default' ? file.color : '';
+                if (folderColor) card.classList.add(`folder-color-${folderColor}`);
+                // Inline color for quick style
+                const colorMap = { blue: '#3b82f6', green: '#10b981', purple: '#8b5cf6', red: '#ef4444', pink: '#ec4899' };
+                if (colorMap[folderColor]) folderColorStyle = `style="color: ${colorMap[folderColor]}"`;
+                
+                previewHTML = `<i class="fas fa-folder" ${folderColorStyle}></i>`;
+            } else {
+                const fmt = (file.format || '').toLowerCase();
+                const isImage = file.type === 'image' && !['pdf'].includes(fmt);
+                const isPDF = fmt === 'pdf';
+                
+                if (isImage) {
+                    previewHTML = `<img src="${file.url}" style="width:100%; height:100%; object-fit:cover; border-radius:8px;">`;
+                } else if (isPDF) {
+                    const pdfThumb = file.url.replace('.pdf', '.png').replace('/upload/', '/upload/w_200,h_260,c_fill,pg_1,q_auto,f_auto/');
+                    previewHTML = `<img src="${pdfThumb}" style="width:100%; height:100%; object-fit:cover; border-radius:8px;">`;
+                } else {
+                    let icon = 'fa-file';
+                    const f = fmt;
+                    if (file.type === 'video') icon = 'fa-file-video';
+                    else if (file.type === 'audio' || f === 'mp3') icon = 'fa-file-audio';
+                    else if (['doc', 'docx'].includes(f)) icon = 'fa-file-word';
+                    else if (['xls', 'xlsx'].includes(f)) icon = 'fa-file-excel';
+                    else if (['csv'].includes(f)) icon = 'fa-file-csv';
+                    else if (['zip', 'rar'].includes(f)) icon = 'fa-file-archive';
+                    else if (['pdf'].includes(f)) icon = 'fa-file-pdf';
+                    previewHTML = `<i class="fas ${icon}"></i>`;
+                }
+            }
+
+            const fileSize = isFolder ? '-- MB' : `${((file.size || 0) / 1024 / 1024).toFixed(2)} MB`;
+
+            card.innerHTML = `
+                <div class="file-checkbox"><i class="fas fa-check"></i></div>
+                <div class="star-badge"><i class="fas fa-star"></i></div>
+                <button class="file-actions-btn"><i class="fas fa-ellipsis-v"></i></button>
+                <div class="file-icon">${previewHTML}</div>
+                <div class="file-info">
+                    <p class="file-name">${file.name}</p>
+                    <p class="file-meta">${fileSize} • ${new Date(file.createdAt).toLocaleDateString()}</p>
+                </div>
+            `;
+
+            card.querySelector('.file-checkbox').onclick = (e) => {
+                e.stopPropagation();
+                toggleFileSelection(card, file);
+            };
+
+            card.querySelector('.file-actions-btn').onclick = (e) => {
+                e.stopPropagation();
+                file.status === 'trash' ? showTrashMenu(e, file) : showActionMenu(e, file);
+            };
+
+            card.onclick = (e) => {
+                // If in selection mode, click toggles select
+                if (selectedFiles.size > 0) {
+                    toggleFileSelection(card, file);
+                    return;
+                }
+                
+                if (isFolder) openFolder(file);
+                else cardOpen(file);
+            };
+
+            fileGrid.appendChild(card);
+        });
+    }
+    
+    // Enforce limits on recent view (after sorting)
+    if (currentView === 'recent') {
+        const nodes = Array.from(fileGrid.children);
+        if (nodes.length > 15) {
+            for (let i = 15; i < nodes.length; i++) {
+                nodes[i].remove();
+            }
+        }
+    }
+};
+
+const toggleFileSelection = (card, file) => {
+    if (selectedFiles.has(file.id)) {
+        selectedFiles.delete(file.id);
+        card.classList.remove('selected');
+    } else {
+        selectedFiles.add(file.id);
+        card.classList.add('selected');
+    }
+    updateBulkActionBar();
+};
+
+const clearSelection = () => {
+    selectedFiles.clear();
+    document.querySelectorAll('.file-card.selected').forEach(c => c.classList.remove('selected'));
+    updateBulkActionBar();
+};
+
+const updateBulkActionBar = () => {
+    const bar = document.getElementById('bulk-action-bar');
+    const count = document.getElementById('bulk-selected-count');
+    if (!bar || !count) return;
+
+    if (selectedFiles.size > 0) {
+        bar.classList.remove('hidden');
+        count.textContent = `${selectedFiles.size} Selected`;
+        
+        // Trash View Toggles
+        const isTrashView = currentView === 'trash';
+        document.getElementById('btn-bulk-restore').classList.toggle('hidden', !isTrashView);
+        document.getElementById('btn-bulk-delete').classList.toggle('hidden', !isTrashView);
+        
+        document.getElementById('btn-bulk-move').classList.toggle('hidden', isTrashView);
+        document.getElementById('btn-bulk-trash').classList.toggle('hidden', isTrashView);
+    } else {
+        bar.classList.add('hidden');
+    }
+};
+
+const createNewFolder = async (name) => {
+    if (!currentUser) return;
+    try {
+        const payload = {
+            userId: currentUser.uid,
+            name: name,
+            type: 'folder',
+            createdAt: Date.now(),
+            isStarred: false,
+            status: 'active',
+            parentId: currentFolderId || null
+        };
+        console.log("Sending payload to Firestore:", payload);
+        const docRef = await addDoc(collection(db, "files"), payload);
+        console.log("Folder created with ID:", docRef.id);
+        showToast("Folder created successfully");
+        hideModals();
+        
+        // Match existing rename pattern for reliable sync
+        setTimeout(() => {
+            window.location.reload();
+        }, 500);
+    } catch (err) {
+        console.error("Critical Folder creation error:", err);
+        showToast("Error creating folder: " + err.message, "error");
+    }
+};
+
+const openFolder = (folder) => {
+    // If not in a standard "tree" view, but user wants to open, we stay in current view but update context
+    // The user specifically wants folders to "open" like My Drive but within the Folder Menu context.
+    
+    // Update folder context
+    currentFolderId = folder.id;
+    // Only push if not already at the end of the path to avoid repeats
+    if (!folderPath.some(f => f.id === folder.id)) {
+        folderPath.push({ id: folder.id, name: folder.name });
+    }
+    renderFiles(allFiles);
+};
+
+const navigateToPath = (index) => {
+    if (index === -1) {
+        currentFolderId = null;
+        folderPath = [];
+    } else {
+        const target = folderPath[index];
+        currentFolderId = target.id;
+        folderPath = folderPath.slice(0, index + 1);
+    }
+    renderFiles(allFiles);
+};
+// --- MENUS ---
+const showActionMenu = (e, file) => {
+    const existing = document.querySelector('.action-dropdown');
+    if (existing) existing.remove();
+
+    const menu = document.createElement('div');
+    menu.className = 'action-dropdown fade-in';
+    menu.style.left = e.clientX + 'px';
+    menu.style.top = e.clientY + 'px';
+
+    menu.innerHTML = `
+        <div class="dropdown-item" id="menu-open"><i class="fas fa-external-link-alt"></i> <span>Open</span></div>
+        <div class="dropdown-item" id="menu-download"><i class="fas fa-download"></i> <span>Download</span></div>
+        <div class="dropdown-item" id="menu-rename"><i class="fas fa-edit"></i> <span>Rename</span></div>
+        <div class="dropdown-item" id="menu-move"><i class="fas fa-exchange-alt"></i> <span>Move</span></div>
+        <div class="dropdown-item" id="menu-star"><i class="fas fa-star"></i> <span>${file.isStarred ? 'Unstar' : 'Star'}</span></div>
+        <div class="dropdown-item" id="menu-share"><i class="fas fa-share-alt"></i> <span>Share</span></div>
+        <div class="dropdown-item delete" id="menu-trash"><i class="fas fa-trash-alt"></i> <span>Move to Trash</span></div>
+    `;
+
+    document.body.appendChild(menu);
+
+    menu.querySelector('#menu-open').onclick = () => cardOpen(file);
+    menu.querySelector('#menu-download').onclick = () => cardDownload(file);
+    menu.querySelector('#menu-rename').onclick = () => showRenameModal(file);
+    menu.querySelector('#menu-move').onclick = () => showMoveModal([file.id]);
+    menu.querySelector('#menu-star').onclick = () => toggleStar(file);
+    menu.querySelector('#menu-share').onclick = () => showShareModal(file);
+    menu.querySelector('#menu-trash').onclick = () => moveFileToTrash(file);
+
+    setTimeout(() => document.onclick = () => menu.remove(), 10);
+};
+
+const showTrashMenu = (e, file) => {
+    const existing = document.querySelector('.action-dropdown');
+    if (existing) existing.remove();
+
+    const menu = document.createElement('div');
+    menu.className = 'action-dropdown fade-in';
+    menu.style.left = e.clientX + 'px';
+    menu.style.top = e.clientY + 'px';
+
+    menu.innerHTML = `
+        <div class="dropdown-item" id="menu-restore"><i class="fas fa-undo"></i> <span>Restore</span></div>
+        <div class="dropdown-item delete" id="menu-delete-forever"><i class="fas fa-exclamation-triangle"></i> <span>Delete Forever</span></div>
+    `;
+
+    document.body.appendChild(menu);
+
+    menu.querySelector('#menu-restore').onclick = () => restoreFromTrash(file);
+    menu.querySelector('#menu-delete-forever').onclick = () => showDeleteForeverModal(file);
+
+    setTimeout(() => document.onclick = () => menu.remove(), 10);
+};
+
+// --- FILE ACTIONS ---
+const cardOpen = async (file) => {
+    const ext = file.name.split('.').pop().toLowerCase();
+    const isDoc = ['xlsx', 'xls', 'docx', 'doc', 'csv', 'zip', 'rar'].includes(ext);
+    
+    if (isDoc) {
+        showToast("Opening in Reader View...", "info");
+        // USE GOOGLE DOCS VIEWER FOR PREVIEW
+        const readerUrl = `https://docs.google.com/viewer?url=${encodeURIComponent(file.url)}&embedded=false`;
+        window.open(readerUrl, '_blank');
+        return;
+    }
+
+    // NORMAL PREVIEW (Images, PDF, MP3)
+    window.open(file.url, '_blank');
+};
+
+const cardDownload = async (file) => {
+    showToast(`Starting Secure Download: ${file.name}`, "info");
+
+    try {
+        // BLOB DOWNLOADER: Forces browser to use the correct name & format
+        const response = await fetch(file.url);
+        if (!response.ok) throw new Error("File not found in storage");
+        
+        const blob = await response.blob();
+        const blobUrl = URL.createObjectURL(blob);
+        
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        a.download = file.name; // THE REAL NAME (e.g. tasks_export.csv)
+        document.body.appendChild(a);
+        a.click();
+        
+        // Cleanup
+        setTimeout(() => {
+            URL.revokeObjectURL(blobUrl);
+            document.body.removeChild(a);
+        }, 100);
+        
+        showToast(`Download Complete: ${file.name}`);
+    } catch (err) {
+        console.error("Blob Download Failed:", err);
+        // Fallback to direct link if fetch is blocked
+        const fallbackUrl = file.url.replace(/\/(image|video|raw)\/upload\//, '/$1/upload/fl_attachment/');
+        window.open(fallbackUrl, '_blank');
+    }
+};
+
+const toggleStar = async (file) => {
+    await updateDoc(doc(db, "files", file.id), { isStarred: !file.isStarred });
+    showToast(file.isStarred ? "Removed from Starred" : "Added to Starred");
+};
+
+const moveFileToTrash = (file) => {
+    currentlyActiveFile = file;
+    showModal(document.getElementById('trash-modal'));
+};
+
+const restoreFromTrash = async (file) => {
+    await updateDoc(doc(db, "files", file.id), { status: 'active' });
+    showToast("File restored");
+};
+
+// --- MODALS ---
+const showModal = (modal) => {
+    modalContainer.classList.remove('hidden');
+    modal.classList.remove('hidden');
+};
+
+const hideModals = () => {
+    modalContainer.classList.add('hidden');
+    document.querySelectorAll('.modal-content').forEach(m => m.classList.add('hidden'));
+};
+
+document.querySelectorAll('.btn-close-modal').forEach(btn => btn.onclick = hideModals);
+modalContainer.onclick = (e) => e.target === modalContainer && hideModals();
+
+const showRenameModal = (file) => {
+    currentlyActiveFile = file;
+    const input = document.getElementById('rename-input');
+    input.value = file.name; // FULL POWER: SHOW FULL FILENAME + EXTENSION
+    showModal(document.getElementById('rename-modal'));
+    input.focus();
+    input.select();
+};
+
+const showShareModal = (file) => {
+    currentlyActiveFile = file;
+    const modal = document.getElementById('share-modal');
+    showModal(modal);
+};
+
+document.getElementById('btn-share-file').onclick = async () => {
+    if (!currentlyActiveFile) return;
+    showToast("Preparing file for sharing...", "info");
+    try {
+        const response = await fetch(currentlyActiveFile.url);
+        const blob = await response.blob();
+        const shareFile = new File([blob], currentlyActiveFile.name, { type: blob.type });
+        
+        // CAN SHARE CHECK (Crucial for Video)
+        if (navigator.share && navigator.canShare && navigator.canShare({ files: [shareFile] })) {
+            await navigator.share({
+                files: [shareFile],
+                title: currentlyActiveFile.name
+            });
+        } else {
+            console.log("File sharing not supported by device. Falling back to link.");
+            alert("This device doesn't support direct file sharing for this type. We'll share it as a Link instead!");
+            document.getElementById('btn-share-link').click(); // Fallback
+        }
+    } catch (err) {
+        console.error("Share failed:", err);
+        showToast("Failed to share file. Try link instead.", "error");
+    }
+};
+
+document.getElementById('btn-share-link').onclick = async () => {
+    if (!currentlyActiveFile) return;
+    if (navigator.share) {
+        await navigator.share({
+            title: currentlyActiveFile.name,
+            url: currentlyActiveFile.url
+        });
+    } else {
+        showToast("Link sharing not supported", "error");
+    }
+};
+
+document.getElementById('btn-copy-link').onclick = () => {
+    if (!currentlyActiveFile) return;
+    navigator.clipboard.writeText(currentlyActiveFile.url);
+    showToast("Link copied to clipboard");
+};
+
+const showDeleteForeverModal = (file) => {
+    currentlyActiveFile = file;
+    showModal(document.getElementById('delete-forever-modal'));
+};
+
+// --- MOVE LOGIC ---
+const showMoveModal = (fileIds) => {
+    const modal = document.getElementById('move-modal');
+    const container = document.getElementById('move-folder-list');
+    container.innerHTML = '';
+    
+    // Get all folders exception ones we are moving
+    const availableFolders = allFiles.filter(f => f.type === 'folder' && !fileIds.includes(f.id));
+    
+    // Add "Root" option
+    const rootItem = document.createElement('div');
+    rootItem.className = 'folder-list-item';
+    rootItem.innerHTML = `<i class="fas fa-hdd"></i> <span>My Drive (Root)</span>`;
+    rootItem.onclick = () => {
+        document.querySelectorAll('.folder-list-item').forEach(el => el.classList.remove('selected'));
+        rootItem.classList.add('selected');
+        rootItem.dataset.id = 'root';
+    };
+    container.appendChild(rootItem);
+
+    availableFolders.forEach(folder => {
+        const item = document.createElement('div');
+        item.className = 'folder-list-item';
+        item.innerHTML = `<i class="fas fa-folder"></i> <span>${folder.name}</span>`;
+        item.onclick = () => {
+            document.querySelectorAll('.folder-list-item').forEach(el => el.classList.remove('selected'));
+            item.classList.add('selected');
+            item.dataset.id = folder.id;
+        };
+        container.appendChild(item);
+    });
+
+    document.getElementById('btn-confirm-move').onclick = async () => {
+        const selected = container.querySelector('.folder-list-item.selected');
+        if (!selected) return showToast("Please select a destination", "error");
+        
+        let targetId = selected.dataset.id === 'root' ? null : selected.dataset.id;
+        showToast("Moving files...");
+        
+        for (const id of fileIds) {
+            try {
+                await updateDoc(doc(db, "files", id), { parentId: targetId });
+            } catch(e) { console.error(e); }
+        }
+        
+        hideModals();
+        showToast("Moved successfully");
+        if(selectedFiles.size > 0) clearSelection();
+    };
+
+    showModal(modal);
+};
+
+// --- FINAL INITIALIZATION & EVENT BINDING ---
+const initModalSystem = () => {
+    // New Folder Trigger
+    if (btnNewFolder) {
+        btnNewFolder.onclick = () => {
+            if (currentUser) {
+                folderInput.value = "";
+                showModal(folderModal);
+                folderInput.focus();
+            } else {
+                showToast("Please login to create folders", "error");
+            }
+        };
+    }
+
+    // New Folder Form
+    const folderFormEl = document.getElementById('folder-form');
+    if (folderFormEl) {
+        folderFormEl.onsubmit = async (e) => {
+            if (e) e.preventDefault();
+            console.log("Confirmed Form Submit triggered for folder creation");
+            const btn = document.getElementById('btn-create-folder-confirm');
+            const input = document.getElementById('folder-input');
+            
+            if (btn) {
+                btn.disabled = true;
+                btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Creating...';
+            }
+            
+            try {
+                const name = input ? input.value.trim() : "";
+                console.log("Attempting to create folder with name:", name);
+                
+                let selectedColor = 'default';
+                const activeColor = document.querySelector('.color-dot.active');
+                if (activeColor) selectedColor = activeColor.dataset.color || 'default';
+
+                if (name) {
+                    const docRef = await addDoc(collection(db, "files"), {
+                        userId: currentUser.uid,
+                        name: name,
+                        type: 'folder',
+                        createdAt: Date.now(),
+                        isStarred: false,
+                        status: 'active',
+                        color: selectedColor,
+                        parentId: currentFolderId || null
+                    });
+                    console.log("Folder created in Firestore with ID:", docRef.id);
+                    showToast("Folder created successfully! Refreshing...");
+                    hideModals();
+                    
+                    // Force refresh to show the new folder immediately as requested
+                    setTimeout(() => {
+                        window.location.reload();
+                    }, 800);
+                }
+            } catch (err) {
+                console.error("Critical Folder creation failure:", err);
+                showToast("Error: " + err.message, "error");
+            } finally {
+                if (btn) {
+                    btn.disabled = false;
+                    btn.textContent = 'Create Folder';
+                }
+            }
+            return false;
+        };
+        
+        // Redundant direct button click listener for robustness
+        const btnConfirm = document.getElementById('btn-create-folder-confirm');
+        if (btnConfirm) {
+            btnConfirm.onclick = (e) => {
+                e.stopPropagation();
+                folderFormEl.requestSubmit ? folderFormEl.requestSubmit() : folderFormEl.submit();
+            };
+        }
+    }
+
+    // Confirm Move to Trash
+    const btnTrashConfirm = document.getElementById('btn-confirm-trash');
+    if (btnTrashConfirm) {
+        btnTrashConfirm.onclick = async () => {
+            if (!currentlyActiveFile) return;
+            try {
+                await updateDoc(doc(db, "files", currentlyActiveFile.id), { status: 'trash' });
+                showToast("Moved to Trash");
+                hideModals();
+            } catch (err) {
+                console.error("Trash Error:", err);
+            }
+        };
+    }
+
+    // Confirm Delete Forever
+    const btnDelConfirm = document.getElementById('btn-confirm-delete');
+    if (btnDelConfirm) {
+        btnDelConfirm.onclick = async () => {
+            if (!currentlyActiveFile) return;
+            try {
+                await deleteDoc(doc(db, "files", currentlyActiveFile.id));
+                showToast("Permanently deleted");
+                hideModals();
+            } catch (err) {
+                console.error("Permanent Delete Error:", err);
+            }
+        };
+    }
+    
+    // Cancel listeners
+    const btnCancelTrash = document.getElementById('btn-cancel-trash');
+    if (btnCancelTrash) btnCancelTrash.onclick = hideModals;
+    
+    const btnCancelDelete = document.getElementById('btn-cancel-delete');
+    if (btnCancelDelete) btnCancelDelete.onclick = hideModals;
+
+    const btnCancelMove = document.getElementById('btn-cancel-move');
+    if (btnCancelMove) btnCancelMove.onclick = hideModals;
+
+    // Color picker
+    document.querySelectorAll('.color-dot').forEach(el => {
+        el.addEventListener('click', (e) => {
+            document.querySelectorAll('.color-dot').forEach(d => d.classList.remove('active'));
+            e.target.classList.add('active');
+        });
+    });
+
+    // Bulk Buttons
+    document.getElementById('btn-bulk-clear')?.addEventListener('click', clearSelection);
+    document.getElementById('btn-bulk-move')?.addEventListener('click', () => showMoveModal([...selectedFiles]));
+    document.getElementById('btn-bulk-trash')?.addEventListener('click', async () => {
+        if(!confirm("Move selected items to trash?")) return;
+        for(let id of selectedFiles) {
+            try { await updateDoc(doc(db, "files", id), { status: 'trash' }); } catch(err){}
+        }
+        showToast("Moved to Trash");
+        clearSelection();
+    });
+    document.getElementById('btn-bulk-restore')?.addEventListener('click', async () => {
+        for(let id of selectedFiles) {
+            try { await updateDoc(doc(db, "files", id), { status: 'active' }); } catch(err){}
+        }
+        showToast("Files Restored");
+        clearSelection();
+    });
+    document.getElementById('btn-bulk-delete')?.addEventListener('click', async () => {
+        if(!confirm("Permanently delete selected items? This cannot be undone.")) return;
+        for(let id of selectedFiles) {
+            try { await deleteDoc(doc(db, "files", id)); } catch(err){}
+        }
+        showToast("Permanently deleted");
+        clearSelection();
+    });
+
+    // Drag and Drop
+    const displayArea = document.getElementById('content-display');
+    const dragOverlay = document.getElementById('drag-overlay');
+
+    if (displayArea) {
+        displayArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dragOverlay.classList.remove('hidden');
+        });
+        displayArea.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            if (e.relatedTarget && !displayArea.contains(e.relatedTarget)) {
+                dragOverlay.classList.add('hidden');
+            }
+        });
+        displayArea.addEventListener('drop', async (e) => {
+            e.preventDefault();
+            dragOverlay.classList.add('hidden');
+            if(!currentUser) return showToast("Please login", "error");
+            
+            if (e.dataTransfer && e.dataTransfer.files) {
+                const files = e.dataTransfer.files;
+                if(files.length > 0) {
+                    showToast(`Uploading ${files.length} file(s)...`, 'info');
+                    for (const file of files) {
+                        try {
+                            const formData = new FormData();
+                            formData.append('file', file);
+                            formData.append('upload_preset', CLOUDINARY_UPLOAD_PRESET);
+                            formData.append('folder', 'clouddrive');
+                            
+                            const res = await fetch(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/upload`, {
+                                method: 'POST', body: formData
+                            });
+                            
+                            if (res.ok) {
+                                const data = await res.json();
+                                await saveFileMetadata({
+                                    secure_url: data.secure_url,
+                                    original_filename: data.original_filename,
+                                    resource_type: data.resource_type,
+                                    bytes: data.bytes
+                                });
+                            }
+                        } catch(err) {
+                            console.error('Drag upload failed:', err);
+                        }
+                    }
+                    showToast("Uploads completed!");
+                }
+            }
+        });
+    }
+    
+    // UNIVERSAL RENAME LISTENER (Stable)
+    const renameForm = document.getElementById('rename-form');
+    if (renameForm) {
+        renameForm.onsubmit = async (e) => {
+            e.preventDefault();
+            if (!currentlyActiveFile) return;
+            const input = document.getElementById('rename-input');
+            const fullNewName = input.value.trim();
+            if (!fullNewName) return;
+            try {
+                hideModals();
+                console.log("Renaming to:", fullNewName);
+                await updateDoc(doc(db, "files", currentlyActiveFile.id), { name: fullNewName });
+                setTimeout(() => {
+                    alert(`Database Sync Complete: Renamed to "${fullNewName}" successfully`);
+                    window.location.reload();
+                }, 400);
+            } catch (err) {
+                alert("Error: Database connection blocked by browser privacy settings.");
+            }
+        };
+    }
+};
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initModalSystem);
+} else {
+    initModalSystem();
+}
